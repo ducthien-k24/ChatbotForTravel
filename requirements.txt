@@ -1,0 +1,8 @@
+streamlit
+pandas
+python-dotenv
+requests
+scikit-learn
+networkx
+osmnx
+openai>=1.40.0
