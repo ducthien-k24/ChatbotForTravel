@@ -6,3 +6,13 @@ scikit-learn
 networkx
 osmnx
 openai>=1.40.0
+
+# FastAPI & async support
+fastapi
+uvicorn[standard]
+aiohttp
+pydantic
+
+# Document generation
+jinja2
+weasyprint
