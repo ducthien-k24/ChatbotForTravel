@@ -2,8 +2,9 @@ import os
 import math
 import osmnx as ox
 import networkx as nx
+import numpy as np
 
-# --- Bật cache để lần sau load nhanh ---
+# --- Cấu hình cache ---
 ox.settings.use_cache = True
 ox.settings.cache_folder = "data/osmnx_cache"
 ox.settings.log_console = True
@@ -26,9 +27,7 @@ def _get_graph_cache_path(city: str) -> str:
 
 def road_graph_for_city(city: str) -> nx.MultiDiGraph:
     """
-    Tải graph đường (drive) cho city.
-    - Dùng bbox trung tâm cho các thành phố lớn.
-    - Cache lại thành file graphml để load nhanh sau này.
+    Tải graph đường (drive) cho city và cache lại để lần sau load nhanh hơn.
     """
     cache_path = _get_graph_cache_path(city)
     if os.path.exists(cache_path):
@@ -48,14 +47,13 @@ def road_graph_for_city(city: str) -> nx.MultiDiGraph:
     if city_key in bbox_by_city:
         north, south, east, west = bbox_by_city[city_key]
         G = ox.graph_from_bbox(
-        bbox=(north, south, east, west),
-        network_type="drive",
-        simplify=True
+            north=north, south=south, east=east, west=west,
+            network_type="drive", simplify=True
         )
-
     else:
         G = ox.graph_from_place(city + ", Vietnam", network_type="drive", simplify=True)
 
+    # Đảm bảo cạnh nào cũng có length
     for u, v, k, data in G.edges(keys=True, data=True):
         if "length" not in data:
             if "geometry" in data:
@@ -71,14 +69,23 @@ def road_graph_for_city(city: str) -> nx.MultiDiGraph:
 
 
 def shortest_distance_km(G: nx.MultiDiGraph, src, dst) -> float:
-    """Khoảng cách ngắn nhất (km) theo mạng lưới đường giữa (lat, lon) src→dst."""
+    """Tính khoảng cách ngắn nhất (km) giữa 2 tọa độ (lat, lon), có kiểm tra lỗi."""
     try:
-        u = ox.distance.nearest_nodes(G, src[1], src[0])
-        v = ox.distance.nearest_nodes(G, dst[1], dst[0])
+        lat1, lon1 = float(src[0]), float(src[1])
+        lat2, lon2 = float(dst[0]), float(dst[1])
+        if any(np.isnan([lat1, lon1, lat2, lon2])):
+            raise ValueError("Toạ độ NaN")
+    except Exception as e:
+        print(f"❌ Lỗi toạ độ không hợp lệ: {e}")
+        return float("inf")
+
+    try:
+        u = ox.distance.nearest_nodes(G, lon1, lat1)
+        v = ox.distance.nearest_nodes(G, lon2, lat2)
         length_m = nx.shortest_path_length(G, u, v, weight="length", method="dijkstra")
         return length_m / 1000.0
     except nx.NetworkXNoPath:
         return float("inf")
     except Exception as e:
-        print("❌ Lỗi khi tính khoảng cách:", e)
+        print(f"❌ Lỗi khi tính khoảng cách: {e}")
         return float("inf")
