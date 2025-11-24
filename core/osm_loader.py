@@ -1,78 +1,59 @@
 import os
-import osmnx as ox
 import pandas as pd
+import glob
 
-# --- Bật cache ---
-ox.settings.use_cache = True
-ox.settings.cache_folder = "data/osmnx_cache"
-ox.settings.log_console = True
+# ==============================
+#  BẢN CHẠY OFFLINE DEMO (HCM)
+# ==============================
 
+def load_local_pois(data_dir: str = "data/") -> pd.DataFrame:
+    """
+    Đọc toàn bộ dữ liệu POI từ 5 file CSV offline.
+    Dùng cho demo Hồ Chí Minh, không gọi Overpass/OSM.
+    """
+    pattern = os.path.join(data_dir, "pois_hcm_*.csv")
+    files = glob.glob(pattern)
+    if not files:
+        raise FileNotFoundError(f"Không tìm thấy file CSV nào trong {data_dir}")
 
-def _download_osm_pois(city: str) -> pd.DataFrame:
-    tags = {
-        "amenity": ["restaurant", "cafe", "bar", "fast_food"],
-        "tourism": ["attraction", "museum", "hotel", "guest_house", "hostel", "gallery"],
-        "leisure": ["park", "garden"],
-    }
+    dfs = []
+    for path in files:
+        try:
+            df = pd.read_csv(path)
+            df["source_file"] = os.path.basename(path)
+            # Chuẩn hoá cột
+            if "tag" not in df.columns:
+                df["tag"] = "unknown"
+            if "lat" not in df.columns or "lon" not in df.columns:
+                continue  # bỏ file không hợp lệ
+            # Điền city cố định là Hồ Chí Minh
+            df["city"] = "Ho Chi Minh"
+            dfs.append(df)
+        except Exception as e:
+            print(f"⚠️ Lỗi khi đọc {path}: {e}")
 
-    bbox_by_city = {
-        "ho chi minh": (10.85, 10.70, 106.83, 106.63),
-        "đà lạt": (11.97, 11.90, 108.47, 108.40),
-        "hà nội": (21.08, 20.95, 105.90, 105.75),
-        "đà nẵng": (16.10, 15.90, 108.30, 108.10),
-        "huế": (16.50, 16.42, 107.63, 107.52),
-        "nha trang": (12.28, 12.18, 109.22, 109.12),
-    }
+    if not dfs:
+        raise ValueError("Không load được dữ liệu POI nào!")
 
-    city_key = city.lower().strip()
-    if city_key in bbox_by_city:
-        north, south, east, west = bbox_by_city[city_key]
-        gdf = ox.features_from_bbox(
-            north=north,
-            south=south,
-            east=east,
-            west=west,
-            tags=tags
-        )
-    else:
-        gdf = ox.features_from_place(city + ", Vietnam", tags)
-
-    if gdf.empty:
-        raise ValueError(f"Không tìm thấy POI cho {city}")
-
-    gdf = gdf.to_crs(epsg=4326)
-    gdf["lat"] = gdf.geometry.centroid.y
-    gdf["lon"] = gdf.geometry.centroid.x
-
-    def detect_category(row):
-        for key in ["amenity", "tourism", "leisure"]:
-            if key in row and pd.notna(row[key]):
-                return str(row[key])
-        return "other"
-
-    gdf["category"] = gdf.apply(detect_category, axis=1)
-    df = gdf[["name", "category", "lat", "lon"]].dropna(subset=["name"])
-    df["city"] = city
-    df["avg_cost"] = 100000
-    df["description"] = df["category"].map({
-        "restaurant": "Nhà hàng nổi tiếng với ẩm thực địa phương.",
-        "cafe": "Quán cà phê yên tĩnh, thích hợp để thư giãn.",
-        "hotel": "Khách sạn thuận tiện cho du khách.",
-        "park": "Không gian xanh mát, lý tưởng để đi dạo.",
-        "museum": "Nơi lưu giữ nhiều giá trị văn hóa, lịch sử.",
-    }).fillna("Địa điểm du lịch được yêu thích.")
-
-    return df
+    all_pois = pd.concat(dfs, ignore_index=True)
+    # Giữ các cột cần thiết cho planner/recommender
+    keep_cols = [
+        c for c in [
+            "name", "tag", "description", "lat", "lon", "avg_cost",
+            "rating", "reviews", "address", "opening_hours",
+            "image_url1", "image_url2", "city", "source_file"
+        ] if c in all_pois.columns
+    ]
+    return all_pois[keep_cols].dropna(subset=["name", "lat", "lon"])
 
 
 def ensure_poi_dataset(city: str) -> pd.DataFrame:
-    """Tự động cache dataset POI theo thành phố."""
-    os.makedirs("data", exist_ok=True)
-    cache_path = f"data/pois_cache_{city.lower().replace(' ', '_')}.csv"
-    if os.path.exists(cache_path):
-        print(f"⚡ Đang load dữ liệu POI từ cache: {cache_path}")
-        return pd.read_csv(cache_path)
-    df = _download_osm_pois(city)
-    df.to_csv(cache_path, index=False)
-    print(f"💾 Đã lưu cache POI: {cache_path}")
-    return df
+    """
+    Với demo offline:
+    - Nếu người dùng chọn Hồ Chí Minh → load CSV local
+    - Thành phố khác → cảnh báo demo chỉ hỗ trợ HCM
+    """
+    city_key = city.lower().strip()
+    if city_key not in ["ho chi minh", "hồ chí minh", "hcm"]:
+        raise ValueError("🧭 Demo chỉ hỗ trợ thành phố Hồ Chí Minh.")
+    return load_local_pois("data/")
