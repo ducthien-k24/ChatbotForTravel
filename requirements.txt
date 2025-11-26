@@ -6,3 +6,5 @@ scikit-learn
 networkx
 osmnx
 openai>=1.40.0
+fastapi
+uvicorn[standard]

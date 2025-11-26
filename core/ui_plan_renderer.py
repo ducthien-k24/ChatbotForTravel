@@ -62,11 +62,11 @@ def render_plan_card(day_idx, plan_day):
                 # Ảnh
                 raw_img = poi.get("image_url1") or poi.get("image_url2")
                 img = fix_google_img(raw_img) or "https://via.placeholder.com/300x200?text=No+Image"
-                st.image(img, use_container_width=True)
+                st.image(img, width="stretch")
 
                 # Chi tiết địa điểm
                 with st.expander("🔍 Xem chi tiết"):
-                    st.image(img, use_container_width=True)
+                    st.image(img, width="stretch")
                     st.markdown(f"### 🏙️ {poi.get('name', 'Địa điểm chưa rõ')}")
                     st.markdown(f"**📍 Địa chỉ:** {poi.get('address', 'Không rõ')}")
                     st.markdown(f"**💰 Giá trung bình:** {int(poi.get('avg_cost', 0)):,} VND")
