@@ -6,3 +6,6 @@ scikit-learn
 networkx
 osmnx
 openai>=1.40.0
+streamlit_folium
+folium
+unidecode

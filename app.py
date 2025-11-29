@@ -1,16 +1,16 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+import pandas as pd
+from pathlib import Path
 import time
 
-from core.intent_detector import detect_intent
-from core.llm_parser import parse_prompt_to_params
-from core.llm_composer import compose_plan_response
 from core.osm_loader import ensure_poi_dataset
 from core.recommender import recommend_pois
 from core.itinerary import build_itinerary
 from core.weather import get_weather
 from core.ui_plan_renderer import render_plan_card
+
 
 # --- Cấu hình trang ---
 st.set_page_config(page_title="TravelGPT+ (Offline Demo)", page_icon="🌍", layout="wide")
@@ -37,69 +37,172 @@ div[data-testid="column"] {
 # --- Tiêu đề ---
 st.title("🌍 TravelGPT+ — Demo Offline Hồ Chí Minh")
 
-# --- Sidebar ---
+
+# --- Helper: Lấy danh sách tag (chuẩn hoá từ CSV) ---
+def get_tags_for_category(category: str):
+    mapping = {
+        "food": "pois_hcm_food.csv",
+        "cafe": "pois_hcm_cafe.csv",
+        "entertainment": "pois_hcm_entertainment.csv",
+        "shopping": "pois_hcm_shopping.csv",
+        "attraction": "pois_hcm_attraction.csv",
+    }
+    file_name = mapping.get(category)
+    if not file_name:
+        return []
+    path = Path(f"data/{file_name}")
+    if not path.exists():
+        return []
+
+    df = pd.read_csv(path)
+
+    # Hợp nhất các biến thể cột tag về 'tag'
+    tag_col = None
+    for c in ["tag", "tags", "keywords", "Labels", "labels"]:
+        if c in df.columns:
+            tag_col = c
+            break
+    if tag_col is None:
+        return []
+
+    # Tách thành list: phân tách bằng , ; |
+    def split_tags(s: str):
+        if not isinstance(s, str):
+            return []
+        s = s.lower()
+        for ch in [";", "|"]:
+            s = s.replace(ch, ",")
+        return [t.strip() for t in s.split(",") if t.strip()]
+
+    uniq = set()
+    for s in df[tag_col].fillna(""):
+        uniq.update(split_tags(s))
+
+    return sorted([t for t in uniq if t])
+
+
+# --- Sidebar cấu hình ---
 with st.sidebar:
     st.header("⚙️ Cá nhân hoá chuyến đi")
+    mode = st.radio("Chọn chế độ hoạt động:", ["Gợi ý địa điểm", "Lập lịch trình"], index=0)
+
     city = st.selectbox("Thành phố:", ["Hồ Chí Minh", "Đà Lạt", "Hà Nội", "Huế", "Đà Nẵng"], index=0)
     if city != "Hồ Chí Minh":
-        st.error("🧭 Demo chỉ hỗ trợ thành phố Hồ Chí Minh. Hãy chọn lại.")
+        st.error("🧭 Demo chỉ hỗ trợ thành phố Hồ Chí Minh.")
         st.stop()
 
-    budget = st.number_input("Ngân sách/ngày (VND)", 100_000, 10_000_000, 1_500_000, 100_000)
-    walk_tolerance_km = st.slider("Chịu đi bộ (km/ngày)", 0.5, 15.0, 5.0, 0.5)
-    transport = st.selectbox("Phương tiện chính", ["xe máy/ô tô", "đi bộ"], index=0)
+    budget = st.number_input("💸 Ngân sách/ngày (VND)", 100_000, 10_000_000, 1_500_000, 100_000)
+    walk_tolerance_km = st.slider("🚶‍♂️ Chịu đi bộ (km/ngày)", 0.5, 15.0, 5.0, 0.5)
+    transport = st.selectbox("🚗 Phương tiện chính", ["Xe máy / Ô tô", "Đi bộ"], index=0)
 
-    st.markdown("### 🎯 Loại địa điểm")
-    category_filter = st.multiselect(
-        "Chọn loại bạn muốn khám phá:",
-        ["🍽 Ẩm thực", "☕ Cafe", "🎢 Giải trí", "🏛 Tham quan", "🛍 Mua sắm"],
-        default=["🍽 Ẩm thực", "🏛 Tham quan"]
-    )
+    # --- Gợi ý địa điểm ---
+    if mode == "Gợi ý địa điểm":
+        st.markdown("### 🎯 Chọn loại địa điểm")
 
-    taste = st.multiselect("Khẩu vị ẩm thực", ["Vietnamese", "Japanese", "Italian", "Cafe", "Seafood", "Vegetarian"], default=["Vietnamese", "Cafe"])
-    interests = st.multiselect("Sở thích/Hoạt động", ["attraction", "park", "museum", "shopping", "nightlife", "food"], default=["attraction", "food"])
-    days = st.number_input("Số ngày hành trình", 1, 10, 2)
+        selected_category = st.selectbox(
+            "Loại địa điểm:",
+            ["food", "cafe", "entertainment", "shopping", "attraction"],
+            index=0
+        )
+        available_tags = get_tags_for_category(selected_category)
+        if selected_category != "shopping" and available_tags:
+            selected_tags = st.multiselect("🏷️ Chọn tag (nếu muốn):", available_tags)
+        else:
+            selected_tags = []
 
+    # --- Lập lịch trình ---
+    else:
+        st.markdown("### 🧭 Cá nhân hoá lịch trình du lịch")
+
+        # 1️⃣ Ăn uống
+        food_tags = get_tags_for_category("food")
+        selected_food_tags = st.multiselect("🍽️ Bạn thích ăn kiểu nào?", food_tags, default=["vietnamese"])
+
+        # 2️⃣ Shopping
+        do_shopping = st.checkbox("🛍️ Có đi shopping không?", value=False)
+
+        # 3️⃣ Entertainment
+        do_entertainment = st.checkbox("🎭 Có đi giải trí không?", value=False)
+        if do_entertainment:
+            entertainment_tags = get_tags_for_category("entertainment")
+            selected_entertainment_tags = st.multiselect(
+                "🎬 Hoạt động giải trí bạn thích:",
+                entertainment_tags,
+                default=[]
+            )
+        else:
+            selected_entertainment_tags = []
+
+        # 4️⃣ Attraction
+        do_attraction = st.checkbox("🏞️ Có đi tham quan không?", value=True)
+        if do_attraction:
+            attraction_tags = get_tags_for_category("attraction")
+            selected_attraction_tags = st.multiselect(
+                "📸 Loại hình tham quan bạn muốn:",
+                attraction_tags,
+                default=[]
+            )
+        else:
+            selected_attraction_tags = []
+
+        # 5️⃣ Số ngày + số điểm
+        days = st.number_input("📅 Số ngày hành trình", 1, 10, 2)
+        # Mặc định 10 điểm/ngày
+        max_poi_per_day = st.slider("📍 Số địa điểm mỗi ngày", 3, 10, 10, 1)
+
+
+# --- Hiển thị thông tin tổng quát ---
 st.caption(f"📍 **{city}** • 💸 {budget:,}đ/ngày • 🚶 {walk_tolerance_km}km/ngày")
 
-# --- Cache dữ liệu ---
-with st.spinner("Đang tải dữ liệu địa điểm offline..."):
+# --- Load dữ liệu POI ---
+with st.spinner("🗺️ Đang tải dữ liệu địa điểm offline..."):
     poi_df = ensure_poi_dataset(city)
 weather_now = get_weather(city)
 
+# (Tuỳ chọn) Debug phân bố category trong dataset
+with st.expander("🔎 Debug nhanh dữ liệu (ẩn/hiện)"):
+    try:
+        ddf = poi_df.copy()
+        ddf["category"] = ddf["category"].fillna("unknown").astype(str).str.lower()
+        st.write("Phân bố category trong dataset gộp:")
+        st.dataframe(ddf["category"].value_counts().rename_axis("category").reset_index(name="count"))
+    except Exception as e:
+        st.caption(f"(debug) lỗi hiển thị: {e}")
 
-# --- Hiển thị thẻ địa điểm ---
+
+# --- Render thẻ địa điểm ---
 def render_poi_card(p):
     st.markdown(f"### 🏙️ {p.get('name', 'Chưa rõ tên')}")
 
-    def fix_google_img(url):
+    def fix_img(url):
         if not isinstance(url, str):
             return None
         if "lh3.googleusercontent.com" in url:
             return f"https://images.weserv.nl/?url={url}"
         return url
 
-    images = [fix_google_img(p.get("image_url1")), fix_google_img(p.get("image_url2"))]
-    images = [u for u in images if u and u.startswith("http")]
+    imgs = [fix_img(p.get("image_url1")), fix_img(p.get("image_url2"))]
+    imgs = [u for u in imgs if u and u.startswith("http")]
 
-    if len(images) == 2:
+    if len(imgs) == 2:
         cols = st.columns(2)
-        with cols[0]:
-            st.image(images[0], use_container_width=True)
-        with cols[1]:
-            st.image(images[1], use_container_width=True)
-    elif len(images) == 1:
-        st.image(images[0], use_container_width=True)
+        cols[0].image(imgs[0], width=450)
+        cols[1].image(imgs[1], width=450)
+    elif len(imgs) == 1:
+        st.image(imgs[0], width=600)
 
-    info_parts = []
+    info = []
     if p.get("tag"):
-        info_parts.append(f"🏷️ {p['tag']}")
+        info.append(f"🏷️ {p['tag']}")
     if p.get("avg_cost"):
-        info_parts.append(f"💵 {int(p['avg_cost']):,}đ")
+        try:
+            info.append(f"💵 {int(p['avg_cost']):,}đ")
+        except Exception:
+            pass
     if p.get("rating"):
-        info_parts.append(f"⭐ {p['rating']}")
-    if info_parts:
-        st.caption(" | ".join(info_parts))
+        info.append(f"⭐ {p['rating']}")
+    if info:
+        st.caption(" | ".join(info))
 
     if p.get("description"):
         st.write(p["description"])
@@ -115,11 +218,13 @@ def render_pois(pois):
 
     st.markdown('<div class="center-container">', unsafe_allow_html=True)
     st.subheader(f"🎯 Gợi ý {len(pois)} địa điểm phù hợp:")
+
     for p in pois:
         render_poi_card(p)
 
-    st.markdown("### 🗺️ Bản đồ vị trí các địa điểm")
-    coords = [(float(p["lat"]), float(p["lon"])) for p in pois if str(p.get("lat")).replace('.', '', 1).isdigit() and str(p.get("lon")).replace('.', '', 1).isdigit()]
+    # --- Bản đồ ---
+    coords = [(float(p["lat"]), float(p["lon"])) for p in pois
+              if pd.notna(p.get("lat")) and pd.notna(p.get("lon"))]
     if not coords:
         st.warning("⚠️ Không thể hiển thị bản đồ vì thiếu tọa độ hợp lệ.")
         return
@@ -135,170 +240,78 @@ def render_pois(pois):
         except Exception:
             continue
 
-    st_folium(fmap, width=900, height=500, key=f"map_{city}")
+    st_folium(fmap, width=900, height=500, key=f"map_{city}_{int(time.time())}")
     st.markdown('</div>', unsafe_allow_html=True)
 
 
-# --- Các nút chức năng nhanh ---
+# --- Các nút chính ---
 col_space, col1, col2, col3, col_space2 = st.columns([1, 2, 2, 2, 1])
 
-with col1:
-    if st.button("🔎 Gợi ý địa điểm theo cá nhân hoá"):
-        if "plan_raw" in st.session_state:
-            del st.session_state["plan_raw"]
-
-        category_map = {
-            "🍽 Ẩm thực": "food",
-            "☕ Cafe": "cafe",
-            "🎢 Giải trí": "entertainment",
-            "🏛 Tham quan": "attraction",
-            "🛍 Mua sắm": "shopping",
-        }
-        chosen = [category_map[c] for c in category_filter if c in category_map]
-        pois = []
-        for cat in chosen:
-            pois.extend(recommend_pois(
+if mode == "Gợi ý địa điểm":
+    with col1:
+        if st.button("🔎 Gợi ý địa điểm", key="btn_recommend"):
+            pois = recommend_pois(
                 city=city,
-                category=cat,
+                category=selected_category,
                 user_query="",
-                taste_tags=taste,
-                activity_tags=interests,
+                taste_tags=[],
+                activity_tags=[],
                 budget_per_day=budget,
                 walk_tolerance_km=walk_tolerance_km,
                 weather_desc=weather_now["description"],
-            ))
-        st.session_state["pois"] = pois
-        render_pois(pois)
+                tag_filter=selected_tags
+            ) or []
 
-with col2:
-    if st.button("⛅ Xem thời tiết hiện tại"):
-        st.info(f"⛅ {city}: {weather_now['description']}, {weather_now['temp']}°C")
+            # 🔒 Lọc cứng lại theo category đã chọn (phòng trường hợp data lẫn loại)
+            want = selected_category.lower()
+            filtered = [p for p in pois if want in str(p.get("category", "")).lower()]
+            # fallback nhẹ nếu lọc xong còn quá ít
+            pois = filtered if len(filtered) >= 3 else pois
 
-with col3:
-    if st.button(f"🧭 Lập lịch trình {days} ngày (auto)"):
-        # Xóa gợi ý cũ
-        if "pois" in st.session_state:
-            del st.session_state["pois"]
+            st.session_state["pois"] = pois
+            st.session_state.pop("plan_raw", None)
+            render_pois(pois)
 
-        params = {
-            "city": city,
-            "budget_vnd": budget,
-            "days": days,
-            "taste_tags": taste,
-            "activity_tags": interests,
-            "walk_tolerance_km": walk_tolerance_km,
-            "transport": transport,
-        }
+else:
+    with col3:
+        if st.button(f"🧭 Tạo lịch trình {days} ngày", key="btn_plan"):
+            params = {
+                "city": city,
+                "budget_vnd": budget,
+                "days": days,
+                "walk_tolerance_km": walk_tolerance_km,
+                "transport": transport,
+                "max_poi_per_day": max_poi_per_day,  # UI mặc định 10
+                "food_tags": selected_food_tags,
+                "do_shopping": do_shopping,
+                "do_entertainment": do_entertainment,
+                "do_attraction": do_attraction,
+                "entertainment_tags": selected_entertainment_tags,
+                "attraction_tags": selected_attraction_tags,
+            }
 
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-        progress_text.text("🔍 Đang tải dữ liệu bản đồ...")
+            progress = st.progress(0)
+            msg = st.empty()
+            msg.text("🚀 Đang khởi tạo lịch trình...")
 
-        for pct in range(0, 101, 25):
-            time.sleep(0.3)
-            progress_bar.progress(pct)
-            progress_text.text(f"🧭 Đang tạo lịch trình du lịch... {pct}%")
+            for pct in range(0, 101, 25):
+                time.sleep(0.3)
+                progress.progress(pct)
+                msg.text(f"🧭 Đang tạo lịch trình du lịch... {pct}%")
 
-        plan_raw = build_itinerary(params, poi_df, weather_now)
-        st.session_state["plan_raw"] = plan_raw
+            plan_raw = build_itinerary(params, poi_df, weather_now)
+            st.session_state["plan_raw"] = plan_raw
+            st.session_state.pop("pois", None)
 
-        progress_bar.empty()
-        progress_text.empty()
-
-        st.markdown('<div class="center-container">', unsafe_allow_html=True)
-        st.success("✨ Lịch trình đã sẵn sàng! Dưới đây là gợi ý chi tiết:")
-        for i, day in enumerate(plan_raw):
-            render_plan_card(i, day)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-
-# --- Chat input ---
-user_input = st.chat_input("Nhập yêu cầu (vd: 'Gợi ý quán cà phê', 'Lịch trình 3 ngày')")
-
-if user_input:
-    st.chat_message("user").write(user_input)
-    intent = detect_intent(user_input)
-
-    if intent == "weather":
-        st.chat_message("assistant").write(
-            f"⛅ Thời tiết {city}: **{weather_now['description']}**, "
-            f"{weather_now['temp']}°C, độ ẩm {weather_now.get('humidity', '?')}%."
-        )
-
-    elif intent == "lookup":
-        if "plan_raw" in st.session_state:
-            del st.session_state["plan_raw"]
-
-        category_map = {
-            "🍽 Ẩm thực": "food",
-            "☕ Cafe": "cafe",
-            "🎢 Giải trí": "entertainment",
-            "🏛 Tham quan": "attraction",
-            "🛍 Mua sắm": "shopping",
-        }
-        chosen = [category_map[c] for c in category_filter if c in category_map]
-        pois = []
-        for cat in chosen:
-            pois.extend(recommend_pois(
-                city=city,
-                category=cat,
-                user_query=user_input,
-                taste_tags=taste,
-                activity_tags=interests,
-                budget_per_day=budget,
-                walk_tolerance_km=walk_tolerance_km,
-                weather_desc=weather_now["description"],
-            ))
-        st.session_state["pois"] = pois
-        st.chat_message("assistant").write("🔎 Đây là danh sách địa điểm gợi ý:")
-        render_pois(pois)
-
-    elif intent == "plan":
-        if "pois" in st.session_state:
-            del st.session_state["pois"]
-
-        params = parse_prompt_to_params(user_input)
-        params.update({
-            "city": city,
-            "budget_vnd": budget,
-            "days": days,
-            "taste_tags": taste,
-            "activity_tags": interests,
-            "walk_tolerance_km": walk_tolerance_km,
-            "transport": transport,
-        })
-
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
-        progress_text.text("🔍 Đang tải dữ liệu bản đồ...")
-
-        for pct in range(0, 101, 25):
-            time.sleep(0.3)
-            progress_bar.progress(pct)
-            progress_text.text(f"🧭 Đang tạo lịch trình du lịch... {pct}%")
-
-        plan_raw = build_itinerary(params, poi_df, weather_now)
-        st.session_state["plan_raw"] = plan_raw
-
-        progress_bar.empty()
-        progress_text.empty()
-
-        st.markdown('<div class="center-container">', unsafe_allow_html=True)
-        st.success("✨ Lịch trình đã sẵn sàng! Dưới đây là gợi ý chi tiết:")
-        for i, day in enumerate(plan_raw):
-            render_plan_card(i, day)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    else:
-        st.chat_message("assistant").write(
-            "💡 Gợi ý: *gợi ý địa điểm*, *xem thời tiết*, hoặc *lên lịch trình nhiều ngày*."
-        )
+            progress.empty()
+            msg.empty()
+            st.success("✨ Lịch trình đã được tạo thành công! Kéo xuống để xem chi tiết.")
 
 
-# --- Hiển thị POIs hoặc Plan nếu có ---
-if "pois" in st.session_state and not user_input:
+# --- Hiển thị kết quả ---
+if "pois" in st.session_state:
     render_pois(st.session_state["pois"])
-elif "plan_raw" in st.session_state and not user_input:
+elif "plan_raw" in st.session_state:
     st.markdown('<div class="center-container">', unsafe_allow_html=True)
     st.success("✨ Lịch trình đã sẵn sàng! Dưới đây là gợi ý chi tiết:")
     for i, day in enumerate(st.session_state["plan_raw"]):

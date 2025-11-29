@@ -10,6 +10,8 @@ FOOD = {"restaurant", "cafe", "fast_food", "bar", "pub", "food"}
 
 def load_category_data(city: str, category: str, base_dir="data/") -> pd.DataFrame:
     """Tải dữ liệu offline tương ứng với category người dùng chọn."""
+    import pandas as pd
+
     category = category.lower()
     mapping = {
         "food": "pois_hcm_food.csv",
@@ -18,14 +20,31 @@ def load_category_data(city: str, category: str, base_dir="data/") -> pd.DataFra
         "shopping": "pois_hcm_shopping.csv",
         "attraction": "pois_hcm_attraction.csv",
     }
+
     file_name = mapping.get(category)
     if not file_name:
         raise ValueError(f"Không có dữ liệu cho category: {category}")
 
     path = f"{base_dir}/{file_name}"
     df = pd.read_csv(path)
+
+    # Thêm metadata cơ bản
     df["city"] = city
     df["source_file"] = file_name
+
+    # 🔧 Đảm bảo có cột tag để tránh KeyError
+    if "tag" not in df.columns:
+        df["tag"] = ""
+
+    # 🔧 Chuẩn hoá dữ liệu cột avg_cost
+    if "avg_cost" in df.columns:
+        df["avg_cost"] = (
+            df["avg_cost"]
+            .astype(str)
+            .str.replace("[^0-9.]", "", regex=True)  # chỉ giữ số và dấu chấm
+        )
+        df["avg_cost"] = pd.to_numeric(df["avg_cost"], errors="coerce")
+
     return df
 
 
@@ -68,10 +87,15 @@ def recommend_pois(
     activity_tags: List[str] = [],
     budget_per_day: int = 500000,
     walk_tolerance_km: float = 5.0,
-    weather_desc: str = ""
+    weather_desc: str = "",
+    tag_filter: List[str] = None
 ) -> List[Dict]:
-    """Gợi ý địa điểm dựa trên loại file CSV tương ứng"""
+    """Gợi ý địa điểm dựa trên loại file CSV tương ứng và tag người dùng chọn."""
     df = load_category_data(city, category)
+
+    # Lọc theo tag nếu có
+    if tag_filter:
+        df = df[df["tag"].isin(tag_filter)]
 
     # Normalize tên thành phố
     df["city_norm"] = df["city"].apply(lambda x: unidecode.unidecode(str(x).lower()))
@@ -84,16 +108,16 @@ def recommend_pois(
 
     # Ngân sách
     if "avg_cost" in df.columns:
-        diff = (df["avg_cost"] - budget_per_day/3).abs()
+        diff = (df["avg_cost"] - budget_per_day / 3).abs()
         df["budget_score"] = 1 - diff / max(diff.max(), 1)
     else:
         df["budget_score"] = 0.5
-
 
     # Thời tiết
     df["weather_score"] = df["tag"].apply(lambda c: _weather_penalty(str(c), weather_desc))
     df["final"] = 0.55 * df["sim"] + 0.2 * df["budget_score"] + 0.25 * df["weather_score"]
 
+    # Ưu tiên nếu có taste tag phù hợp
     if any(t in ["Vietnamese", "Japanese", "Italian", "Cafe", "Seafood", "Vegetarian"] for t in taste_tags):
         df.loc[df["tag"].isin(FOOD), "final"] += 0.05
 
