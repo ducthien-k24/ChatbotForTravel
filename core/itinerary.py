@@ -6,6 +6,7 @@ import pandas as pd
 
 from .route_optimizer import pairwise_distance_matrix, mst_order, total_distance
 from .geo_graph import road_graph_for_city, shortest_distance_km
+from .weather import get_daily_forecast
 
 
 # ============================================================
@@ -370,7 +371,9 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
     city = params["city"]
     days = int(params.get("days", 2))
     weather_desc = (weather_now or {}).get("description", "")
-    max_per_day = int(params.get("max_poi_per_day", 10))  # mặc định 10
+    max_per_day = int(params.get("max_poi_per_day", 6))  # có thể tăng lên 10 nếu muốn
+    # NEW: dự báo từng ngày
+    daily_forecast = get_daily_forecast(city, days)
 
     # Preferences
     food_tags = params.get("food_tags", [])
@@ -445,12 +448,16 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
     out_days: List[Dict] = []
     G = road_graph_for_city(city)
     for day_idx, dpois in enumerate(days_pois):
+        # chọn forecast đúng ngày (an toàn index)
+        fw = daily_forecast[day_idx] if day_idx < len(daily_forecast) else None
+        weather_line = f"{fw['summary']} — {fw['advice']}" if fw else weather_desc
+
         if len(dpois) < 2:
             out_days.append({
                 "title": f"Khám phá nhẹ - Ngày {day_idx + 1}",
                 "pois": dpois,
                 "distance": 0.0,
-                "weather": weather_desc
+                "weather": weather_line
             })
             continue
 
@@ -474,7 +481,7 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
             "title": f"Khám phá ngày {day_idx + 1}",
             "pois": ordered_pois,
             "distance": round(total_km, 2),
-            "weather": weather_desc
+            "weather": weather_line
         })
 
     return out_days
