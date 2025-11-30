@@ -97,57 +97,18 @@ def _weather_penalty_row(row: pd.Series, weather_desc: str) -> float:
 # --------------------------
 # Data loading
 # --------------------------
-def load_category_data(city: str, category: str, base_dir: str = "data") -> pd.DataFrame:
-    """Tải dữ liệu offline tương ứng với category người dùng chọn."""
-    mapping = {
-        "food": "pois_hcm_food.csv",
-        "cafe": "pois_hcm_cafe.csv",
-        "entertainment": "pois_hcm_entertainment.csv",
-        "shopping": "pois_hcm_shopping.csv",
-        "attraction": "pois_hcm_attraction.csv",
-    }
-    cat = (category or "unknown").lower()
-    fn = mapping.get(cat)
-    p = Path(base_dir) / fn if fn else None
-    if not p or not p.exists():
-        return pd.DataFrame()
+from core.datasource import load_category_df
 
-    df = pd.read_csv(p)
-    # gắn nhãn & metadata
-    df["category"] = cat
-    df["city"] = city
+def load_category_data(city: str, category: str, base_dir: str = "data") -> pd.DataFrame:  # adapter wrapper
+    """Delegate to unified datasource (API or CSV)."""
+    df = load_category_df(city, category)
+    if df is None or df.empty:
+        return pd.DataFrame()
+    # Recompute tags_list & rating_num for scoring consistency
     if "tag" not in df.columns:
         df["tag"] = ""
     df["tag"] = df["tag"].fillna("").astype(str)
     df["tags_list"] = df["tag"].apply(_split_tags)
-
-    # clean cost
-    if "avg_cost" in df.columns:
-        df["avg_cost"] = (
-            df["avg_cost"].astype(str).str.replace("[^0-9.,]", "", regex=True)
-            .str.replace(",", ".", regex=False)
-        )
-        df["avg_cost"] = pd.to_numeric(df["avg_cost"], errors="coerce")
-
-    # name
-    if "name" not in df.columns:
-        df["name"] = df.get("place_id", df.index).astype(str)
-    else:
-        df["name"] = df["name"].astype(str)
-        empty = df["name"].str.strip().eq("")
-        if "place_id" in df.columns:
-            df.loc[empty, "name"] = df["place_id"].astype(str)
-            empty = df["name"].str.strip().eq("")
-        if "address" in df.columns:
-            df.loc[empty, "name"] = df["address"].fillna("").astype(str)
-
-    # lat/lon
-    if "lat" in df.columns: df["lat"] = df["lat"].apply(_parse_coord)
-    if "lon" in df.columns: df["lon"] = df["lon"].apply(_parse_coord)
-
-    # city_norm
-    df["city_norm"] = _city_norm(city)  # vì ta đã gán df["city"]=city
-    # rating_num (nếu có)
     if "rating" in df.columns:
         def _to_float(x):
             try: return float(x)
@@ -155,7 +116,12 @@ def load_category_data(city: str, category: str, base_dir: str = "data") -> pd.D
         df["rating_num"] = df["rating"].apply(_to_float)
     else:
         df["rating_num"] = None
-
+    # city_norm
+    df["city"] = city
+    df["city_norm"] = _city_norm(city)
+    # sanitize lat/lon
+    if "lat" in df.columns: df["lat"] = df["lat"].apply(_parse_coord)
+    if "lon" in df.columns: df["lon"] = df["lon"].apply(_parse_coord)
     return df
 
 
@@ -177,22 +143,26 @@ def recommend_pois(
 ) -> List[Dict]:
     """
     Gợi ý địa điểm cho 1 category:
-      - An toàn khi rỗng (không bao giờ .iloc[0]).
+      - An toàn khi rỗng (không .iloc[0]).
       - Lọc tag mềm.
       - Phạt thời tiết nhẹ cho attraction/outdoor khi mưa.
-      - Xếp hạng: TF-IDF theo (name + tag + description) + ngân sách + thời tiết + rating/ảnh.
+      - Xếp hạng: TF-IDF(name+tag+description) + ngân sách + thời tiết + rating/ảnh.
     """
-    # 1) nguồn dữ liệu
+    # 1) Nguồn dữ liệu
     if poi_df is not None:
         df = poi_df.copy()
-        # ép category nếu gọi từ ngoài truyền tổng hợp
+        # ép & canonicalize category
         df["category"] = df.get("category", "unknown").astype(str).str.lower().map(_canonicalize_category)
         df = df[df["category"].eq(category.lower())]
+        # đảm bảo cột tag/tags_list tồn tại
         if "tag" not in df.columns:
             df["tag"] = ""
-        df["tags_list"] = df["tag"].fillna("").astype(str).apply(_split_tags)
+        df["tag"] = df["tag"].fillna("").astype(str)
+        df["tags_list"] = df["tag"].apply(_split_tags)
+        # tọa độ: ép về float an toàn
         if "lat" in df.columns: df["lat"] = df["lat"].apply(_parse_coord)
         if "lon" in df.columns: df["lon"] = df["lon"].apply(_parse_coord)
+        # city
         df["city"] = city
         df["city_norm"] = _city_norm(city)
     else:
@@ -201,52 +171,63 @@ def recommend_pois(
     if df is None or df.empty:
         return []
 
-    # 2) lọc theo tag (mềm)
+    # 2) Lọc (mềm) theo tag được chọn ở UI (không loại cứng toàn bộ dataset)
     df = _soft_tag_filter(df, tag_filter)
 
-    # 3) TF-IDF theo truy vấn
+    if df.empty:
+        return []
+
+    # 3) TF-IDF theo truy vấn (name + tag + description)
     taste_tags = taste_tags or []
     activity_tags = activity_tags or []
     query = " ".join([user_query] + taste_tags + activity_tags + [city])
-    texts = df["name"].fillna("") + " " + df["tag"].fillna("") + " " + df.get("description", "")
+
+    desc_series = df["description"] if "description" in df.columns else pd.Series([""] * len(df), index=df.index)
+    texts = df["name"].fillna("").astype(str) + " " + df["tag"].fillna("").astype(str) + " " + desc_series.fillna("").astype(str)
     df["sim"] = _tfidf_cosine(texts, query)
 
-    # 4) Ngân sách
-    if "avg_cost" in df.columns and df["avg_cost"].notna().any():
-        diff = (df["avg_cost"] - budget_per_day / 3).abs()
-        df["budget_score"] = 1 - diff / max(diff.max(), 1)
+    # 4) Ngân sách (ÉP VỀ SỐ trước khi tính)
+    if "avg_cost" in df.columns:
+        df["avg_cost_num"] = pd.to_numeric(df["avg_cost"], errors="coerce")
+        if df["avg_cost_num"].notna().any():
+            target = budget_per_day / 3.0
+            diff = (df["avg_cost_num"] - target).abs()
+            df["budget_score"] = 1 - diff / max(diff.max(), 1.0)
+        else:
+            df["budget_score"] = 0.5
     else:
         df["budget_score"] = 0.5
 
-    # 5) Thời tiết
+    # 5) Thời tiết (phạt nhẹ outdoor khi mưa)
     df["weather_score"] = df.apply(lambda r: _weather_penalty_row(r, weather_desc), axis=1)
 
-    # 6) Điểm tổng
-    # thêm tín hiệu rating & có ảnh
-    if "image_url1" in df.columns:
-        has_img = df["image_url1"].astype(str).str.startswith(("http://", "https://")).astype(int)
+    # 6) Các tín hiệu bổ sung: rating, có ảnh
+    if "rating" in df.columns:
+        df["rating_num"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0.0)
     else:
-        has_img = 0
+        df["rating_num"] = 0.0
 
-    rating = df.get("rating_num", pd.Series([0] * len(df), index=df.index)).fillna(0)
+    if "image_url1" in df.columns:
+        df["has_img"] = df["image_url1"].astype(str).str.startswith(("http://", "https://")).astype(int)
+    else:
+        df["has_img"] = 0
 
     df["final"] = (
         0.55 * df["sim"]
         + 0.20 * df["budget_score"]
         + 0.15 * df["weather_score"]
-        + 0.10 * rating
-        + 0.05 * has_img
+        + 0.10 * df["rating_num"]
+        + 0.05 * df["has_img"]
     )
 
-    # boost nhỏ nếu category là food/cafe và có overlap với taste_tags
-    if category.lower() in {"food", "cafe"} and taste_tags:
-        wants = set(t.lower() for t in taste_tags)
+    # 7) Boost nhẹ cho taste tag khi category là food/cafe
+    if category.lower() in {"food", "cafe"} and (taste_tags or []):
+        wants = set(t.lower() for t in taste_tags or [])
         df["has_taste"] = df["tags_list"].apply(lambda ts: any(t in wants for t in ts))
         df.loc[df["has_taste"], "final"] += 0.05
 
-    # 7) sort + lấy top_k
-    df = df.sample(frac=1.0, random_state=random.randint(1, 9999))  # shuffle nhẹ
-    df = df.sort_values("final", ascending=False)
+    # 8) sort + lấy top_k (shuffle nhẹ để tránh đồng hạng)
+    df = df.sample(frac=1.0, random_state=random.randint(1, 9999)).sort_values("final", ascending=False)
 
     cols = [c for c in [
         "name", "category", "tag", "city", "avg_cost", "description",

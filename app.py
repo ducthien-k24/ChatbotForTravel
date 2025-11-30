@@ -5,7 +5,7 @@ import pandas as pd
 from pathlib import Path
 import time
 
-from core.osm_loader import ensure_poi_dataset
+from core.datasource import load_all_categories
 from core.recommender import recommend_pois
 from core.itinerary import build_itinerary
 from core.weather import get_weather
@@ -155,8 +155,8 @@ with st.sidebar:
 st.caption(f"📍 **{city}** • 💸 {budget:,}đ/ngày • 🚶 {walk_tolerance_km}km/ngày")
 
 # --- Load dữ liệu POI ---
-with st.spinner("🗺️ Đang tải dữ liệu địa điểm offline..."):
-    poi_df = ensure_poi_dataset(city)
+with st.spinner("🗺️ Đang tải dữ liệu địa điểm (API/CSV adapter)..."):
+    poi_df = load_all_categories(city, ["food","cafe","entertainment","shopping","attraction"])
 weather_now = get_weather(city)
 
 # (Tuỳ chọn) Debug phân bố category trong dataset
@@ -270,7 +270,11 @@ if mode == "Gợi ý địa điểm":
 
             st.session_state["pois"] = pois
             st.session_state.pop("plan_raw", None)
-            render_pois(pois)
+            # Don't render immediately here — set session state and let the
+            # main render path (below) display the POIs. Rendering here and
+            # again at the end of the script caused duplicate Streamlit
+            # elements (same `key`) when both ran within the same second.
+            # render_pois(pois)
 
 else:
     with col3:

@@ -1,91 +1,132 @@
-import os
+# core/geo_graph.py — dùng osmnx offline 100%
 import math
-import osmnx as ox
-import networkx as nx
-import numpy as np
+from pathlib import Path
+from typing import Optional, Tuple
 
-# --- Cấu hình cache ---
-ox.settings.use_cache = True
-ox.settings.cache_folder = "data/osmnx_cache"
-ox.settings.log_console = True
+import osmnx as ox            # bắt buộc có osmnx
+import networkx as nx         # bắt buộc có networkx
 
 
-def haversine_dist(lat1, lon1, lat2, lon2):
-    """Tính khoảng cách địa lý (m) giữa 2 tọa độ lat/lon (haversine)."""
-    R = 6371000
+# Map city -> file graphml local (đổi nếu bạn dùng tên khác)
+_OFFLINE_GRAPH_FILES = {
+    "hồ chí minh": "hồ_chí_minh_graph.graphml",
+    "ho chi minh": "hồ_chí_minh_graph.graphml",
+    "hcm": "hồ_chí_minh_graph.graphml",
+}
+
+# Cache trong RAM để không đọc file lặp lại
+_GRAPH_CACHE: dict[str, Optional[nx.MultiDiGraph]] = {}
+
+
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """Khoảng cách đường thẳng (m)."""
+    R = 6371000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = phi2 - phi1
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
 
 
-def _get_graph_cache_path(city: str) -> str:
-    os.makedirs("data", exist_ok=True)
-    return f"data/{city.lower().replace(' ', '_')}_graph.graphml"
-
-
-def road_graph_for_city(city: str) -> nx.MultiDiGraph:
+def _load_graphml_from_disk(city: str) -> Optional[nx.MultiDiGraph]:
     """
-    Tải graph đường (drive) cho city và cache lại để lần sau load nhanh hơn.
+    Chỉ đọc file .graphml trong ./data, KHÔNG gọi Overpass.
+    Ưu tiên theo map city -> filename; nếu không khớp, lấy file .graphml đầu tiên.
     """
-    cache_path = _get_graph_cache_path(city)
-    if os.path.exists(cache_path):
-        print(f"⚡ Đang tải graph từ cache: {cache_path}")
-        return ox.load_graphml(cache_path)
+    data_dir = Path("data")
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    bbox_by_city = {
-        "ho chi minh": (10.85, 10.70, 106.83, 106.63),
-        "đà lạt": (11.97, 11.90, 108.47, 108.40),
-        "hà nội": (21.08, 20.95, 105.90, 105.75),
-        "đà nẵng": (16.10, 15.90, 108.30, 108.10),
-        "huế": (16.50, 16.42, 107.63, 107.52),
-        "nha trang": (12.28, 12.18, 109.22, 109.12),
-    }
+    key = (city or "").strip().lower()
+    fname = _OFFLINE_GRAPH_FILES.get(key)
 
-    city_key = city.lower().strip()
-    if city_key in bbox_by_city:
-        north, south, east, west = bbox_by_city[city_key]
-        G = ox.graph_from_bbox(
-            north=north, south=south, east=east, west=west,
-            network_type="drive", simplify=True
-        )
-    else:
-        G = ox.graph_from_place(city + ", Vietnam", network_type="drive", simplify=True)
+    if not fname:
+        first = next(data_dir.glob("*.graphml"), None)
+        fname = first.name if first else None
+    if not fname:
+        return None
 
-    # Đảm bảo cạnh nào cũng có length
+    path = data_dir / fname
+    if not path.exists():
+        return None
+
+    # osmnx load (local), không qua mạng
+    G = ox.load_graphml(path)
+    # ép về MultiDiGraph nếu cần
+    if not isinstance(G, nx.MultiDiGraph):
+        G = nx.MultiDiGraph(G)
+
+    # đảm bảo mỗi cạnh có 'length' (m)
     for u, v, k, data in G.edges(keys=True, data=True):
         if "length" not in data:
-            if "geometry" in data:
-                data["length"] = data["geometry"].length
+            if "geometry" in data and data["geometry"] is not None:
+                # geometry là Linestring với CRS WGS84 → ước lượng theo đoạn thẳng các điểm
+                try:
+                    coords = list(data["geometry"].coords)
+                    dist = 0.0
+                    for (x1, y1), (x2, y2) in zip(coords[:-1], coords[1:]):
+                        dist += _haversine_m(y1, x1, y2, x2)
+                    data["length"] = dist
+                except Exception:
+                    x1, y1 = G.nodes[u]["x"], G.nodes[u]["y"]
+                    x2, y2 = G.nodes[v]["x"], G.nodes[v]["y"]
+                    data["length"] = _haversine_m(y1, x1, y2, x2)
             else:
                 x1, y1 = G.nodes[u]["x"], G.nodes[u]["y"]
                 x2, y2 = G.nodes[v]["x"], G.nodes[v]["y"]
-                data["length"] = haversine_dist(y1, x1, y2, x2)
+                data["length"] = _haversine_m(y1, x1, y2, x2)
 
-    ox.save_graphml(G, cache_path)
-    print(f"💾 Graph được lưu cache tại: {cache_path}")
     return G
 
 
-def shortest_distance_km(G: nx.MultiDiGraph, src, dst) -> float:
-    """Tính khoảng cách ngắn nhất (km) giữa 2 tọa độ (lat, lon), có kiểm tra lỗi."""
+def road_graph_for_city(city: str) -> Optional[nx.MultiDiGraph]:
+    """
+    Trả về graph đường từ file .graphml local (offline).
+    """
+    key = (city or "").strip().lower()
+    if key in _GRAPH_CACHE:
+        return _GRAPH_CACHE[key]
+    G = _load_graphml_from_disk(city)
+    _GRAPH_CACHE[key] = G
+    return G
+
+
+def _nearest_node(G: nx.MultiDiGraph, lat: float, lon: float):
+    """
+    nearest_nodes của osmnx — chạy local hoàn toàn (không gọi mạng).
+    """
+    return ox.distance.nearest_nodes(G, lon, lat)
+
+
+def shortest_distance_km(G: Optional[nx.MultiDiGraph],
+                         src: Tuple[float, float],
+                         dst: Tuple[float, float]) -> float:
+    """
+    Khoảng cách ngắn nhất (km) theo graph nếu có; nếu thiếu dữ liệu → fallback Haversine.
+    """
     try:
         lat1, lon1 = float(src[0]), float(src[1])
         lat2, lon2 = float(dst[0]), float(dst[1])
-        if any(np.isnan([lat1, lon1, lat2, lon2])):
-            raise ValueError("Toạ độ NaN")
-    except Exception as e:
-        print(f"❌ Lỗi toạ độ không hợp lệ: {e}")
-        return float("inf")
+    except Exception:
+        # toạ độ không hợp lệ → 0 km
+        return 0.0
+
+    if G is None:
+        return _haversine_m(lat1, lon1, lat2, lon2) / 1000.0
 
     try:
-        u = ox.distance.nearest_nodes(G, lon1, lat1)
-        v = ox.distance.nearest_nodes(G, lon2, lat2)
-        length_m = nx.shortest_path_length(G, u, v, weight="length", method="dijkstra")
-        return length_m / 1000.0
-    except nx.NetworkXNoPath:
-        return float("inf")
-    except Exception as e:
-        print(f"❌ Lỗi khi tính khoảng cách: {e}")
-        return float("inf")
+        u = _nearest_node(G, lat1, lon1)
+        v = _nearest_node(G, lat2, lon2)
+        if u is None or v is None:
+            return _haversine_m(lat1, lon1, lat2, lon2) / 1000.0
+
+        try:
+            length_m = nx.shortest_path_length(G, u, v, weight="length", method="dijkstra")
+            return float(length_m) / 1000.0
+        except nx.NetworkXNoPath:
+            return _haversine_m(lat1, lon1, lat2, lon2) / 1000.0
+        except Exception:
+            # không có weight → ước lượng theo số cạnh (~80m/cạnh)
+            steps = nx.shortest_path_length(G, u, v, weight=None)
+            return float(steps) * 0.08
+    except Exception:
+        return _haversine_m(lat1, lon1, lat2, lon2) / 1000.0
