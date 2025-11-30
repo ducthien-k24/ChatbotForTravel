@@ -1,6 +1,8 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+import time
+import math
 
 # CSS hiệu ứng + style card
 st.markdown("""
@@ -58,20 +60,32 @@ def render_plan_card(day_idx, plan_day):
         with st.container():
             st.markdown('<div class="poi-card">', unsafe_allow_html=True)
             cols = st.columns([1, 2])
+
             with cols[0]:
                 # Ảnh
                 raw_img = poi.get("image_url1") or poi.get("image_url2")
                 img = fix_google_img(raw_img) or "https://via.placeholder.com/300x200?text=No+Image"
-                st.image(img, width="stretch")
+                st.image(img, width=600)
 
                 # Chi tiết địa điểm
                 with st.expander("🔍 Xem chi tiết"):
-                    st.image(img, width="stretch")
+                    st.image(img, width=600)
                     st.markdown(f"### 🏙️ {poi.get('name', 'Địa điểm chưa rõ')}")
                     st.markdown(f"**📍 Địa chỉ:** {poi.get('address', 'Không rõ')}")
-                    st.markdown(f"**💰 Giá trung bình:** {int(poi.get('avg_cost', 0)):,} VND")
+
+                    # ✅ Sửa lỗi NaN ở avg_cost
+                    avg_cost = poi.get("avg_cost")
+                    if avg_cost is None or (isinstance(avg_cost, float) and math.isnan(avg_cost)):
+                        st.markdown("**💰 Giá trung bình:** Không rõ")
+                    else:
+                        try:
+                            st.markdown(f"**💰 Giá trung bình:** {int(avg_cost):,} VND")
+                        except Exception:
+                            st.markdown("**💰 Giá trung bình:** Không rõ")
+
                     st.markdown(f"**⭐ Đánh giá:** {poi.get('rating', 'N/A')}")
                     st.markdown(f"**🕒 Thời gian:** {poi.get('time', 'Không có')}")
+
                     desc = poi.get('description', '')
                     if desc:
                         st.markdown("### 📝 Mô tả chi tiết")
@@ -80,11 +94,13 @@ def render_plan_card(day_idx, plan_day):
             with cols[1]:
                 st.markdown(f"### 🏙️ {poi.get('name', 'Địa điểm chưa rõ')}")
                 st.caption(f"📍 {poi.get('address', 'Không rõ địa chỉ')}")
-                st.caption(f"💰 {int(poi.get('avg_cost', 0)):,} VND • ⭐ {poi.get('rating', 'N/A')}")
+                st.caption(f"⭐ {poi.get('rating', 'N/A')}")
+
                 desc = poi.get('description', '')
                 if desc:
                     short = desc[:150] + "..." if len(desc) > 150 else desc
                     st.write(short)
+
             st.markdown('</div>', unsafe_allow_html=True)
 
         # Hiển thị khoảng cách giữa các điểm
@@ -94,12 +110,41 @@ def render_plan_card(day_idx, plan_day):
 
     st.divider()
 
-    # Mini map trong ngày
-    valid_coords = [p for p in pois if isinstance(p.get('lat'), (int, float)) and isinstance(p.get('lon'), (int, float))]
+    # --- Mini map trong ngày + Polyline ---
+    valid_coords = []
+    for p in pois:
+        try:
+            lat = float(p.get("lat"))
+            lon = float(p.get("lon"))
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                valid_coords.append({"lat": lat, "lon": lon, "name": p.get("name", "")})
+        except (TypeError, ValueError):
+            continue
+
     if len(valid_coords) >= 2:
         lat_center = sum(p['lat'] for p in valid_coords) / len(valid_coords)
         lon_center = sum(p['lon'] for p in valid_coords) / len(valid_coords)
         fmap = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+
+        # 🗺️ Marker các điểm
         for p in valid_coords:
-            folium.Marker([p['lat'], p['lon']], tooltip=p['name']).add_to(fmap)
-        st_folium(fmap, width=850, height=400, key=f"map_day_{day_idx}")
+            folium.Marker(
+                [p['lat'], p['lon']],
+                tooltip=p['name'],
+                icon=folium.Icon(color="blue", icon="info-sign")
+            ).add_to(fmap)
+
+        # 🧭 Vẽ Polyline theo thứ tự
+        coords = [(p['lat'], p['lon']) for p in valid_coords]
+        folium.PolyLine(
+            coords,
+            color="darkblue",
+            weight=3,
+            opacity=0.8,
+            tooltip=f"Tuyến đường Ngày {day_idx+1}"
+        ).add_to(fmap)
+
+        st.markdown("### 🗺️ Bản đồ hành trình trong ngày")
+        st_folium(fmap, width=850, height=400, key=f"map_day_{day_idx}_{int(time.time())}")
+    else:
+        st.warning("⚠️ Không đủ tọa độ hợp lệ để hiển thị bản đồ.")
