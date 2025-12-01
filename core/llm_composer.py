@@ -30,3 +30,34 @@ def compose_plan_response(plan_raw, params):
         return r.choices[0].message.content.strip()
     except Exception:
         return "Không tạo được văn bản lịch trình. Hãy thử lại."
+    
+def generate_day_summary(day_number, day_data):
+    if not OPENAI_API_KEY:
+        names = ", ".join([p.get("name", "") for p in day_data.get("order", [])])
+        return f"Day {day_number}: Visit {names}."
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    places = day_data.get("order", [])
+    names = [p.get("name", "") for p in places]
+    descs = [p.get("description", "") for p in places if p.get("description")]
+
+    prompt = f"""
+    You are a professional travel writer.
+    Write a short and engaging English summary (3–4 sentences) for Day {day_number} of a travel itinerary.
+    Base your writing on these places and their short descriptions:
+
+    Places: {', '.join(names)}
+    Descriptions: {'; '.join(descs)}.
+
+    Write in natural English, positive tone, and make it flow like a travel recommendation.
+    """
+
+    try:
+        r = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        return r.choices[0].message.content.strip()
+    except Exception:
+        return f"Day {day_number}: Summary not generated."

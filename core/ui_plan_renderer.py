@@ -49,6 +49,9 @@ def render_plan_card(day_idx, plan_day):
     """Hiển thị 1 ngày hành trình dạng thẻ đẹp + ảnh + bản đồ."""
     st.markdown(f"## 🗓️ Ngày {day_idx+1}: {plan_day.get('title', 'Khám phá')}")
     st.caption(f"🌤 {plan_day.get('weather', 'Không rõ')} • 🚗 {plan_day.get('distance', 0):.2f} km tổng quãng đường")
+    summary = plan_day.get("summary", "")
+    if summary:
+        st.markdown(f"**📝 Summary:** {summary}")
     st.divider()
 
     pois = plan_day.get("pois", [])

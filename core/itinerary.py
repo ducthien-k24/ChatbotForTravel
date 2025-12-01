@@ -1,3 +1,4 @@
+import enum
 from typing import Dict, List
 import random
 import math
@@ -7,7 +8,7 @@ import pandas as pd
 from .route_optimizer import pairwise_distance_matrix, mst_order, total_distance
 from .geo_graph import road_graph_for_city, shortest_distance_km
 from .weather import get_daily_forecast
-
+from core.llm_composer import generate_day_summary
 
 # ============================================================
 # Canonicalization & utilities
@@ -483,5 +484,12 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
             "distance": round(total_km, 2),
             "weather": weather_line
         })
+        
+    for i, day in enumerate(out_days, start=1):
+        try:
+            summary = generate_day_summary(i, {"order": day["pois"]})
+            day["summary"] = summary
+        except Exception as e:
+            day["summary"] = f"Day {i}: Summary not generated due to error: {e}"
 
     return out_days
