@@ -257,6 +257,7 @@ def _select_diverse_pois(
 # ============================================================
 
 def build_itinerary(params: Dict, poi_df, weather_now: Dict):
+    from core.geo_graph import road_graph_for_city, shortest_distance_km
 
     city = params["city"]
     days = int(params.get("days", 2))
@@ -314,6 +315,16 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
     # route optimize
     out_days = []
     G = road_graph_for_city(city)
+    MAX_JUMP_KM = 15.0  # giới hạn khoảng cách giữa hai POI liên tiếp
+
+    user_loc = params.get("user_location")
+    start_latlon = None
+    if user_loc:
+        try:
+            lat0, lon0 = map(float, user_loc.split(","))
+            start_latlon = (lat0, lon0)
+        except Exception:
+            pass
 
     for i, dpois in enumerate(days_pois):
         fw = daily_forecast[i] if i < len(daily_forecast) else None
@@ -328,11 +339,18 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
             })
             continue
 
+        # sắp xếp theo đường đi tối ưu (MST)
         dist_mat, coords, _ = pairwise_distance_matrix(city, dpois)
         order = mst_order(dist_mat)
         ordered = [dpois[k] for k in order]
         total_km = total_distance(dist_mat, order)
 
+        # nếu có vị trí người dùng -> bắt đầu từ điểm gần nhất
+        if start_latlon:
+            ordered.sort(key=lambda p: shortest_distance_km(G, start_latlon, (p["lat"], p["lon"])))
+
+        # gán khoảng cách giữa các điểm
+        clean_order = [ordered[0]]
         for j in range(len(ordered) - 1):
             try:
                 d_km = shortest_distance_km(
@@ -341,8 +359,20 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
                     (ordered[j+1]["lat"], ordered[j+1]["lon"])
                 )
                 ordered[j]["next_distance_km"] = round(d_km, 2)
+                # nếu > giới hạn thì bỏ qua điểm xa quá
+                if d_km <= MAX_JUMP_KM:
+                    clean_order.append(ordered[j+1])
+                else:
+                    print(f"⚠️ Bỏ {ordered[j+1].get('name')} vì cách {d_km:.1f} km")
             except Exception:
                 ordered[j]["next_distance_km"] = "?"
+
+        ordered = clean_order
+        total_km = sum(
+            shortest_distance_km(G, (ordered[k]["lat"], ordered[k]["lon"]),
+                                 (ordered[k+1]["lat"], ordered[k+1]["lon"]))
+            for k in range(len(ordered) - 1)
+        )
 
         out_days.append({
             "title": f"Khám phá ngày {i+1}",
@@ -355,7 +385,7 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
     for i, day in enumerate(out_days, start=1):
         try:
             day["summary"] = generate_day_summary(i, {"order": day["pois"]})
-        except:
+        except Exception:
             day["summary"] = f"Day {i}: summary error"
 
     return out_days

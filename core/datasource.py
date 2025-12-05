@@ -16,6 +16,7 @@ import time  # (giữ nếu muốn logging/throttle sau này)
 
 import pandas as pd
 import requests
+import streamlit as st
 
 # ====== Config qua ENV ======
 API_BASE_URL_DEFAULT = "http://localhost:3000/api"
@@ -167,7 +168,7 @@ def load_category_df(city: str, category: str, fallback_to_csv=True) -> pd.DataF
         df["city"] = city
     return df
 
-
+@st.cache_data
 def load_all_categories(city: str, categories: List[str]) -> pd.DataFrame:
     """Gom nhiều category vào một DataFrame, loại trùng cơ bản."""
     frames: List[pd.DataFrame] = []

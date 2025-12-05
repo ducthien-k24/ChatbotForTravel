@@ -10,6 +10,7 @@ from core.recommender import recommend_pois
 from core.itinerary import build_itinerary
 from core.weather import get_weather
 from core.ui_plan_renderer import render_plan_card
+from streamlit_js_eval import streamlit_js_eval
 
 
 # --- Cấu hình trang ---
@@ -95,6 +96,45 @@ with st.sidebar:
     walk_tolerance_km = st.slider("🚶‍♂️ Chịu đi bộ (km/ngày)", 0.5, 15.0, 5.0, 0.5)
     transport = st.selectbox("🚗 Phương tiện chính", ["Xe máy / Ô tô", "Đi bộ"], index=0)
 
+    # --- Thêm lựa chọn vị trí hiện tại ---
+    use_current_location = st.checkbox("📍 Ưu tiên địa điểm gần vị trí hiện tại", value=False)
+
+    if use_current_location:
+        st.markdown("#### 📡 Lấy vị trí hiện tại (GPS)")
+        if "user_location" not in st.session_state or not st.session_state["user_location"]:
+
+            coords = streamlit_js_eval(
+                js_expressions="""
+                new Promise((resolve, reject) => {
+                    if (navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition(
+                            pos => {
+                                resolve(pos.coords.latitude + ',' + pos.coords.longitude);
+                            },
+                            err => {
+                                console.log("Geolocation error:", err);
+                                resolve(null);
+                            }
+                        );
+                    } else {
+                        console.log("Geolocation not supported");
+                        resolve(null);
+                    }
+                }).then(res => res);
+                """,
+                key="get_location_once",
+                want_output=True,
+            )
+
+            if coords and isinstance(coords, str) and "," in coords:
+                st.session_state["user_location"] = coords.strip()
+                st.success(f"📍 Vị trí hiện tại: {coords}")
+            else:
+                st.info("Đang dò vị trí... (hãy bật quyền truy cập vị trí trong trình duyệt)")
+                
+        else:
+            st.success(f"📍 Vị trí hiện tại: {st.session_state['user_location']}")
+
     # --- Gợi ý địa điểm ---
     if mode == "Gợi ý địa điểm":
         st.markdown("### 🎯 Chọn loại địa điểm")
@@ -147,7 +187,6 @@ with st.sidebar:
 
         # 5️⃣ Số ngày + số điểm
         days = st.number_input("📅 Số ngày hành trình", 1, 10, 2)
-        # Mặc định 10 điểm/ngày
         max_poi_per_day = st.slider("📍 Số địa điểm mỗi ngày", 3, 10, 10, 1)
 
 
@@ -155,93 +194,17 @@ with st.sidebar:
 st.caption(f"📍 **{city}** • 💸 {budget:,}đ/ngày • 🚶 {walk_tolerance_km}km/ngày")
 
 # --- Load dữ liệu POI ---
-with st.spinner("🗺️ Đang tải dữ liệu địa điểm (API/CSV adapter)..."):
-    poi_df = load_all_categories(city, ["food","cafe","entertainment","shopping","attraction"])
-weather_now = get_weather(city)
+if "poi_df" not in st.session_state or st.session_state.get("poi_city") != city:
+    with st.spinner("🗺️ Đang tải dữ liệu địa điểm (API/CSV adapter)..."):
+        st.session_state["poi_df"] = load_all_categories(city, ["food","cafe","entertainment","shopping","attraction"])
+        st.session_state["poi_city"] = city
+poi_df = st.session_state["poi_df"]
 
-# (Tuỳ chọn) Debug phân bố category trong dataset
-with st.expander("🔎 Debug nhanh dữ liệu (ẩn/hiện)"):
-    try:
-        ddf = poi_df.copy()
-        ddf["category"] = ddf["category"].fillna("unknown").astype(str).str.lower()
-        st.write("Phân bố category trong dataset gộp:")
-        st.dataframe(ddf["category"].value_counts().rename_axis("category").reset_index(name="count"))
-    except Exception as e:
-        st.caption(f"(debug) lỗi hiển thị: {e}")
+if "weather_now" not in st.session_state or st.session_state.get("weather_city") != city:
+    st.session_state["weather_now"] = get_weather(city)
+    st.session_state["weather_city"] = city
+weather_now = st.session_state["weather_now"]
 
-
-# --- Render thẻ địa điểm ---
-def render_poi_card(p):
-    st.markdown(f"### 🏙️ {p.get('name', 'Chưa rõ tên')}")
-
-    def fix_img(url):
-        if not isinstance(url, str):
-            return None
-        if "lh3.googleusercontent.com" in url:
-            return f"https://images.weserv.nl/?url={url}"
-        return url
-
-    imgs = [fix_img(p.get("image_url1")), fix_img(p.get("image_url2"))]
-    imgs = [u for u in imgs if u and u.startswith("http")]
-
-    if len(imgs) == 2:
-        cols = st.columns(2)
-        cols[0].image(imgs[0], width=450)
-        cols[1].image(imgs[1], width=450)
-    elif len(imgs) == 1:
-        st.image(imgs[0], width=600)
-
-    info = []
-    if p.get("tag"):
-        info.append(f"🏷️ {p['tag']}")
-    if p.get("avg_cost"):
-        try:
-            info.append(f"💵 {int(p['avg_cost']):,}đ")
-        except Exception:
-            pass
-    if p.get("rating"):
-        info.append(f"⭐ {p['rating']}")
-    if info:
-        st.caption(" | ".join(info))
-
-    if p.get("description"):
-        st.write(p["description"])
-    if p.get("address"):
-        st.info(f"📍 {p['address']}")
-    st.divider()
-
-
-def render_pois(pois):
-    if not pois:
-        st.warning("Không tìm thấy địa điểm phù hợp.")
-        return
-
-    st.markdown('<div class="center-container">', unsafe_allow_html=True)
-    st.subheader(f"🎯 Gợi ý {len(pois)} địa điểm phù hợp:")
-
-    for p in pois:
-        render_poi_card(p)
-
-    # --- Bản đồ ---
-    coords = [(float(p["lat"]), float(p["lon"])) for p in pois
-              if pd.notna(p.get("lat")) and pd.notna(p.get("lon"))]
-    if not coords:
-        st.warning("⚠️ Không thể hiển thị bản đồ vì thiếu tọa độ hợp lệ.")
-        return
-
-    lat_center = sum(lat for lat, _ in coords) / len(coords)
-    lon_center = sum(lon for _, lon in coords) / len(coords)
-    fmap = folium.Map(location=[lat_center, lon_center], zoom_start=13)
-
-    for p in pois:
-        try:
-            lat, lon = float(p["lat"]), float(p["lon"])
-            folium.Marker([lat, lon], popup=p["name"], tooltip=p["name"]).add_to(fmap)
-        except Exception:
-            continue
-
-    st_folium(fmap, width=900, height=500, key=f"map_{city}_{int(time.time())}")
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 # --- Các nút chính ---
@@ -250,6 +213,8 @@ col_space, col1, col2, col3, col_space2 = st.columns([1, 2, 2, 2, 1])
 if mode == "Gợi ý địa điểm":
     with col1:
         if st.button("🔎 Gợi ý địa điểm", key="btn_recommend"):
+            user_loc = st.session_state.get("user_location") if use_current_location else None
+
             pois = recommend_pois(
                 city=city,
                 category=selected_category,
@@ -259,22 +224,16 @@ if mode == "Gợi ý địa điểm":
                 budget_per_day=budget,
                 walk_tolerance_km=walk_tolerance_km,
                 weather_desc=weather_now["description"],
-                tag_filter=selected_tags
+                tag_filter=selected_tags,
+                user_location=user_loc   # 🔹 truyền vị trí vào recommender
             ) or []
 
-            # 🔒 Lọc cứng lại theo category đã chọn (phòng trường hợp data lẫn loại)
             want = selected_category.lower()
             filtered = [p for p in pois if want in str(p.get("category", "")).lower()]
-            # fallback nhẹ nếu lọc xong còn quá ít
             pois = filtered if len(filtered) >= 3 else pois
 
             st.session_state["pois"] = pois
             st.session_state.pop("plan_raw", None)
-            # Don't render immediately here — set session state and let the
-            # main render path (below) display the POIs. Rendering here and
-            # again at the end of the script caused duplicate Streamlit
-            # elements (same `key`) when both ran within the same second.
-            # render_pois(pois)
 
 else:
     with col3:
@@ -285,7 +244,7 @@ else:
                 "days": days,
                 "walk_tolerance_km": walk_tolerance_km,
                 "transport": transport,
-                "max_poi_per_day": max_poi_per_day,  # UI mặc định 10
+                "max_poi_per_day": max_poi_per_day,
                 "food_tags": selected_food_tags,
                 "do_shopping": do_shopping,
                 "do_entertainment": do_entertainment,
@@ -313,6 +272,83 @@ else:
 
 
 # --- Hiển thị kết quả ---
+def render_poi_card(p):
+    st.markdown(f"### 🏙️ {p.get('name', 'Chưa rõ tên')}")
+    def fix_img(url):
+        if not isinstance(url, str):
+            return None
+        if "lh3.googleusercontent.com" in url:
+            return f"https://images.weserv.nl/?url={url}"
+        return url
+
+    imgs = [fix_img(p.get("image_url1")), fix_img(p.get("image_url2"))]
+    imgs = [u for u in imgs if u and u.startswith("http")]
+    if len(imgs) == 2:
+        cols = st.columns(2)
+        cols[0].image(imgs[0], width=450)
+        cols[1].image(imgs[1], width=450)
+    elif len(imgs) == 1:
+        st.image(imgs[0], width=600)
+
+    info = []
+    if p.get("tag"):
+        info.append(f"🏷️ {p['tag']}")
+    if p.get("avg_cost"):
+        try:
+            info.append(f"💵 {int(p['avg_cost']):,}đ")
+        except Exception:
+            pass
+    if p.get("rating"):
+        info.append(f"⭐ {p['rating']}")
+        
+    if p.get("distance_km") is not None:
+        try:
+            info.append(f"📏 {float(p['distance_km']):.2f} km từ vị trí của bạn")
+        except Exception:
+            pass
+        
+    if info:
+        st.caption(" | ".join(info))
+
+    if p.get("description"):
+        st.write(p["description"])
+    if p.get("address"):
+        st.info(f"📍 {p['address']}")
+    st.divider()
+
+
+def render_pois(pois):
+    if not pois:
+        st.warning("Không tìm thấy địa điểm phù hợp.")
+        return
+
+    st.markdown('<div class="center-container">', unsafe_allow_html=True)
+    st.subheader(f"🎯 Gợi ý {len(pois)} địa điểm phù hợp:")
+
+    for p in pois:
+        render_poi_card(p)
+
+    coords = [(float(p["lat"]), float(p["lon"])) for p in pois
+              if pd.notna(p.get("lat")) and pd.notna(p.get("lon"))]
+    if not coords:
+        st.warning("⚠️ Không thể hiển thị bản đồ vì thiếu tọa độ hợp lệ.")
+        return
+
+    lat_center = sum(lat for lat, _ in coords) / len(coords)
+    lon_center = sum(lon for _, lon in coords) / len(coords)
+    fmap = folium.Map(location=[lat_center, lon_center], zoom_start=13)
+
+    for p in pois:
+        try:
+            lat, lon = float(p["lat"]), float(p["lon"])
+            folium.Marker([lat, lon], popup=p["name"], tooltip=p["name"]).add_to(fmap)
+        except Exception:
+            continue
+
+    st_folium(fmap, width=900, height=500, key=f"map_{city}_{int(time.time())}")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 if "pois" in st.session_state:
     render_pois(st.session_state["pois"])
 elif "plan_raw" in st.session_state:

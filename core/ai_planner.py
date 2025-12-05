@@ -44,6 +44,11 @@ VERY STRICT RULES:
 
 6. Output MUST be valid JSON only.
 
+7. Distance realism rule:
+       - Assume all POIs are within the same city.
+       - Do NOT plan itineraries that would require traveling > 20km between any two POIs.
+       - Favor clusters of POIs that are geographically close.
+
 OUTPUT FORMAT (MANDATORY):
 {{
   "total_per_day": number,

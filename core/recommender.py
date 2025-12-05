@@ -1,4 +1,3 @@
-# core/recommender.py
 from __future__ import annotations
 from typing import List, Dict, Optional
 from pathlib import Path
@@ -8,6 +7,9 @@ import unidecode
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+
+# ✅ Dùng graph offline để tính khoảng cách
+from core.geo_graph import road_graph_for_city, shortest_distance_km
 
 OUTDOOR_HINTS = {"park", "garden", "viewpoint", "beach", "outdoor", "lake"}
 _CANON_SET = {"food", "cafe", "entertainment", "attraction", "shopping", "unknown"}
@@ -28,7 +30,6 @@ def _canonicalize_category(cat: str) -> str:
     return "unknown"
 
 def _parse_coord(val):
-    """Làm sạch toạ độ kiểu '10.791.858.651.304.300' -> 10.7918586513043."""
     if val is None: return None
     if isinstance(val, (int, float)): return float(val)
     s = str(val).strip()
@@ -56,7 +57,6 @@ def _city_norm(s: str) -> str:
     return unidecode.unidecode((s or "").lower())
 
 def _soft_tag_filter(df: pd.DataFrame, tag_filter: Optional[List[str]]) -> pd.DataFrame:
-    """Khớp mềm: bất kỳ tag_filter xuất hiện trong tags_list hoặc substring của 'tag'."""
     if df is None or df.empty or not tag_filter:
         return df
     wants = [t.lower().strip() for t in tag_filter if isinstance(t, str) and t.strip()]
@@ -65,7 +65,7 @@ def _soft_tag_filter(df: pd.DataFrame, tag_filter: Optional[List[str]]) -> pd.Da
     lst_mask = df["tags_list"].apply(lambda ts: any(w in ts for w in wants))
     subs_mask = df["tag"].str.contains("|".join(map(re.escape, wants)), case=False, na=False)
     out = df[lst_mask | subs_mask]
-    return out if not out.empty else df  # nếu lọc ra rỗng → trả lại df để tránh crash
+    return out if not out.empty else df
 
 def _tfidf_cosine(texts: pd.Series, query: str) -> pd.Series:
     if texts.str.strip().eq("").all():
@@ -99,12 +99,10 @@ def _weather_penalty_row(row: pd.Series, weather_desc: str) -> float:
 # --------------------------
 from core.datasource import load_category_df
 
-def load_category_data(city: str, category: str, base_dir: str = "data") -> pd.DataFrame:  # adapter wrapper
-    """Delegate to unified datasource (API or CSV)."""
+def load_category_data(city: str, category: str, base_dir: str = "data") -> pd.DataFrame:
     df = load_category_df(city, category)
     if df is None or df.empty:
         return pd.DataFrame()
-    # Recompute tags_list & rating_num for scoring consistency
     if "tag" not in df.columns:
         df["tag"] = ""
     df["tag"] = df["tag"].fillna("").astype(str)
@@ -116,10 +114,8 @@ def load_category_data(city: str, category: str, base_dir: str = "data") -> pd.D
         df["rating_num"] = df["rating"].apply(_to_float)
     else:
         df["rating_num"] = None
-    # city_norm
     df["city"] = city
     df["city_norm"] = _city_norm(city)
-    # sanitize lat/lon
     if "lat" in df.columns: df["lat"] = df["lat"].apply(_parse_coord)
     if "lon" in df.columns: df["lon"] = df["lon"].apply(_parse_coord)
     return df
@@ -136,57 +132,47 @@ def recommend_pois(
     taste_tags: Optional[List[str]] = None,
     activity_tags: Optional[List[str]] = None,
     budget_per_day: int = 500_000,
-    walk_tolerance_km: float = 5.0,   # hiện chưa dùng, để mở rộng
+    walk_tolerance_km: float = 5.0,
     weather_desc: str = "",
     tag_filter: Optional[List[str]] = None,
     top_k: int = 30,
+    user_location: Optional[str] = None,  # thêm vị trí người dùng
 ) -> List[Dict]:
     """
     Gợi ý địa điểm cho 1 category:
-      - An toàn khi rỗng (không .iloc[0]).
       - Lọc tag mềm.
-      - Phạt thời tiết nhẹ cho attraction/outdoor khi mưa.
-      - Xếp hạng: TF-IDF(name+tag+description) + ngân sách + thời tiết + rating/ảnh.
+      - TF-IDF, rating, ảnh, ngân sách, thời tiết.
+      - Nếu có user_location: dùng OSM graph để tính khoảng cách thật.
     """
-    # 1) Nguồn dữ liệu
     if poi_df is not None:
         df = poi_df.copy()
-        # ép & canonicalize category
         df["category"] = df.get("category", "unknown").astype(str).str.lower().map(_canonicalize_category)
         df = df[df["category"].eq(category.lower())]
-        # đảm bảo cột tag/tags_list tồn tại
         if "tag" not in df.columns:
             df["tag"] = ""
         df["tag"] = df["tag"].fillna("").astype(str)
         df["tags_list"] = df["tag"].apply(_split_tags)
-        # tọa độ: ép về float an toàn
         if "lat" in df.columns: df["lat"] = df["lat"].apply(_parse_coord)
         if "lon" in df.columns: df["lon"] = df["lon"].apply(_parse_coord)
-        # city
         df["city"] = city
         df["city_norm"] = _city_norm(city)
     else:
         df = load_category_data(city, category)
-
     if df is None or df.empty:
         return []
 
-    # 2) Lọc (mềm) theo tag được chọn ở UI (không loại cứng toàn bộ dataset)
     df = _soft_tag_filter(df, tag_filter)
-
     if df.empty:
         return []
 
-    # 3) TF-IDF theo truy vấn (name + tag + description)
     taste_tags = taste_tags or []
     activity_tags = activity_tags or []
     query = " ".join([user_query] + taste_tags + activity_tags + [city])
 
     desc_series = df["description"] if "description" in df.columns else pd.Series([""] * len(df), index=df.index)
-    texts = df["name"].fillna("").astype(str) + " " + df["tag"].fillna("").astype(str) + " " + desc_series.fillna("").astype(str)
+    texts = df["name"].fillna("") + " " + df["tag"].fillna("") + " " + desc_series.fillna("")
     df["sim"] = _tfidf_cosine(texts, query)
 
-    # 4) Ngân sách (ÉP VỀ SỐ trước khi tính)
     if "avg_cost" in df.columns:
         df["avg_cost_num"] = pd.to_numeric(df["avg_cost"], errors="coerce")
         if df["avg_cost_num"].notna().any():
@@ -198,10 +184,7 @@ def recommend_pois(
     else:
         df["budget_score"] = 0.5
 
-    # 5) Thời tiết (phạt nhẹ outdoor khi mưa)
     df["weather_score"] = df.apply(lambda r: _weather_penalty_row(r, weather_desc), axis=1)
-
-    # 6) Các tín hiệu bổ sung: rating, có ảnh
     if "rating" in df.columns:
         df["rating_num"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0.0)
     else:
@@ -220,18 +203,29 @@ def recommend_pois(
         + 0.05 * df["has_img"]
     )
 
-    # 7) Boost nhẹ cho taste tag khi category là food/cafe
-    if category.lower() in {"food", "cafe"} and (taste_tags or []):
-        wants = set(t.lower() for t in taste_tags or [])
-        df["has_taste"] = df["tags_list"].apply(lambda ts: any(t in wants for t in ts))
-        df.loc[df["has_taste"], "final"] += 0.05
+    # ✅ Tính khoảng cách thật bằng OSM nếu có user_location
+    if user_location:
+        try:
+            lat0, lon0 = map(float, user_location.split(","))
+            G = road_graph_for_city(city)
+            df["distance_km"] = df.apply(
+                lambda r: shortest_distance_km(G, (lat0, lon0), (r["lat"], r["lon"]))
+                if pd.notna(r["lat"]) and pd.notna(r["lon"]) else None,
+                axis=1
+            )
+            # Giảm điểm theo khoảng cách (xa hơn → điểm thấp hơn)
+            df["distance_score"] = df["distance_km"].apply(lambda d: max(0.0, 1 - (d or 0) / 30))
+            df["final"] = df["final"] * df["distance_score"]
+        except Exception as e:
+            print("⚠️ Distance compute error:", e)
 
-    # 8) sort + lấy top_k (shuffle nhẹ để tránh đồng hạng)
+    # Sắp xếp kết quả
     df = df.sample(frac=1.0, random_state=random.randint(1, 9999)).sort_values("final", ascending=False)
 
     cols = [c for c in [
         "name", "category", "tag", "city", "avg_cost", "description",
-        "lat", "lon", "image_url1", "image_url2", "address", "rating", "reviews", "final"
+        "lat", "lon", "image_url1", "image_url2", "address", "rating",
+        "reviews", "final", "distance_km"
     ] if c in df.columns]
 
     return df[cols].head(min(top_k, 50)).to_dict(orient="records")
