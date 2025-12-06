@@ -10,3 +10,4 @@ streamlit_folium
 folium
 unidecode
 streamlit-js-eval
+fpdf

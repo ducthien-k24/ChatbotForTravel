@@ -1,7 +1,7 @@
 import json
 import google.generativeai as genai
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-pro"
 
 
 def analyze_user_preferences(params, model_name=DEFAULT_MODEL):
@@ -25,7 +25,7 @@ VERY STRICT RULES:
 1. total_per_day must equal EXACTLY {max_poi}.
 
 2. FOOD:
-   - Must ALWAYS be >= 2.
+   - Must ALWAYS be >= 2 and <= 3.
    - Cafe is a SEPARATE category and optional.
    - Cafe may be 0 or 1. Never more than 1.
    - Food should be considered essential.

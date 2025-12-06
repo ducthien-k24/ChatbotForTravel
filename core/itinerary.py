@@ -160,6 +160,12 @@ def _ensure_key_columns(df: pd.DataFrame) -> pd.DataFrame:
         return f"{base}|{pid}" if pid else base
 
     df["unique_key"] = df.apply(_build_key, axis=1)
+    
+    # --- ensure image columns survive (for PDF) ---
+    for c in ["image_url1", "image_url2"]:
+        if c not in df.columns:
+            df[c] = None
+
     return df
 
 
@@ -315,7 +321,7 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
     # route optimize
     out_days = []
     G = road_graph_for_city(city)
-    MAX_JUMP_KM = 15.0  # giới hạn khoảng cách giữa hai POI liên tiếp
+    MAX_JUMP_KM = 20.0  # giới hạn khoảng cách giữa hai POI liên tiếp
 
     user_loc = params.get("user_location")
     start_latlon = None

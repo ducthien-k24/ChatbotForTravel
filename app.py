@@ -11,6 +11,7 @@ from core.itinerary import build_itinerary
 from core.weather import get_weather
 from core.ui_plan_renderer import render_plan_card
 from streamlit_js_eval import streamlit_js_eval
+from core.export_pdf import export_itinerary_to_pdf
 
 
 # --- Cấu hình trang ---
@@ -351,9 +352,48 @@ def render_pois(pois):
 
 if "pois" in st.session_state:
     render_pois(st.session_state["pois"])
+
 elif "plan_raw" in st.session_state:
     st.markdown('<div class="center-container">', unsafe_allow_html=True)
-    st.success("✨ Lịch trình đã sẵn sàng! Dưới đây là gợi ý chi tiết:")
+    st.success("✨ The itinerary is ready! Here are the detailed plans:")
     for i, day in enumerate(st.session_state["plan_raw"]):
         render_plan_card(i, day)
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- Export PDF section ---
+    st.markdown("### 📄 Export itinerary to PDF")
+
+    # State control
+    if "pdf_ready" not in st.session_state:
+        st.session_state["pdf_ready"] = None
+    if "pdf_generating" not in st.session_state:
+        st.session_state["pdf_generating"] = False
+
+    # Button handler
+    if st.button("📥 Generate PDF", key="btn_export_pdf"):
+        st.session_state["pdf_generating"] = True
+
+    # Actual PDF generation
+    if st.session_state["pdf_generating"]:
+        with st.spinner("🧾 Generating your travel PDF... Please wait a few seconds."):
+            try:
+                filename = export_itinerary_to_pdf(st.session_state["plan_raw"])
+                st.session_state["pdf_ready"] = filename
+                st.session_state["pdf_generating"] = False
+                st.success("✅ PDF generated successfully!")
+                st.toast("🎉 PDF is ready! Scroll down to download.", icon="✅")
+                st.balloons()
+            except Exception as e:
+                st.error(f"❌ PDF export failed: {e}")
+                st.session_state["pdf_generating"] = False
+
+    # Show download button if file ready
+    if st.session_state["pdf_ready"]:
+        with open(st.session_state["pdf_ready"], "rb") as f:
+            st.download_button(
+                "⬇️ Download PDF",
+                f,
+                file_name=st.session_state["pdf_ready"],
+                mime="application/pdf",
+                key="download_pdf"
+            )
