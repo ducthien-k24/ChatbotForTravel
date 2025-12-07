@@ -1,7 +1,7 @@
 import json
 import google.generativeai as genai
 
-DEFAULT_MODEL = "gemini-2.5-pro"
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
 
 def analyze_user_preferences(params, model_name=DEFAULT_MODEL):
@@ -72,6 +72,15 @@ Output ONLY valid JSON. No extra text.
 
     try:
         data = json.loads(text)
+        dist = data.get("distribution", {})
+        
+        dist["food"] = min(max(dist.get("food", 2), 2), 3)
+        dist["cafe"] = min(dist.get("cafe", 0), 1)
+        dist["shopping"] = min(dist.get("shopping", 0), 1)
+
+        data["distribution"] = dist
+        print("🧠 Gemini distribution result:", json.dumps(data, ensure_ascii=False, indent=2))
+
         return data
     except Exception:
         # fallback in case of parsing error

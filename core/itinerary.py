@@ -271,13 +271,29 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
 
     # AI planner
     ai_plan = analyze_user_preferences(params)
-    dist = ai_plan["distribution"]
+    dist = ai_plan.get("distribution", {})
 
-    food_target = dist.get("food", 2)
+    food_target = min(3, dist.get("food", 2))
     cafe_target = dist.get("cafe", 0)
     att_target = dist.get("attraction", 0)
     ent_target = dist.get("entertainment", 0)
     shop_target = dist.get("shopping", 0)
+    
+    max_per_day = int(params.get("max_poi_per_day", 6))
+    total = food_target + cafe_target + att_target + ent_target + shop_target
+    if total > max_per_day:
+    # giảm bớt food trước nếu dư
+        overflow = total - max_per_day
+        reduce_from = min(overflow, max(food_target - 2, 0))
+        food_target -= reduce_from
+        
+    elif total < max_per_day:
+        # nếu thiếu, ưu tiên attraction rồi entertainment
+        remaining = max_per_day - total
+        if att_target > 0:
+            att_target += remaining
+        else:
+            ent_target += remaining
 
     daily_forecast = get_daily_forecast(city, days)
 
@@ -321,7 +337,7 @@ def build_itinerary(params: Dict, poi_df, weather_now: Dict):
     # route optimize
     out_days = []
     G = road_graph_for_city(city)
-    MAX_JUMP_KM = 20.0  # giới hạn khoảng cách giữa hai POI liên tiếp
+    MAX_JUMP_KM = 25.0  # giới hạn khoảng cách giữa hai POI liên tiếp
 
     user_loc = params.get("user_location")
     start_latlon = None
